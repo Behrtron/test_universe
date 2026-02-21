@@ -315,11 +315,10 @@
                 <button id="btnMoveSE" style="grid-column: 3; grid-row: 3;">↘</button>
             </div>
             
-            <!-- Zoom Controls -->
+            <!-- Zoom Controls (locked at 5x) -->
             <div class="zoom-controls">
-                <button id="btnZoomIn">+</button>
-                <div class="zoom-level" id="zoomLevel">1.0x</div>
-                <button id="btnZoomOut">−</button>
+                <div class="zoom-level" id="zoomLevel" style="margin-bottom: 10px;">5.0x</div>
+                <button id="btnToggle3D" style="font-size: 14px; width: 50px; height: 30px;">3D</button>
             </div>
         </div>
         
@@ -400,7 +399,7 @@
         // World Region Generator JavaScript Wrapper
         // ============================================================================
         class WorldRegionGenerator {
-            constructor(seed = 42, radius = 32, seaLevel = 0.3) {
+            constructor(seed = 422, radius = 10, seaLevel = 0.3) {
                 this.seed = seed;
                 this.radius = radius;
                 this.seaLevel = seaLevel;
@@ -487,7 +486,8 @@
             
             // Render region using C++ isometric renderer (same as world.bmp output)
             // viewCenterX/Y: world coordinates to center view on (use -1 to center on region center)
-            renderIsometric(outputWidth = null, outputHeight = null, viewCenterX = -1, viewCenterY = -1) {
+            // zoom: zoom level (1.0 = normal, >1.0 = zoomed in, <1.0 = zoomed out)
+            renderIsometric(outputWidth = null, outputHeight = null, viewCenterX = -1, viewCenterY = -1, zoom = 1.0, animationTime = 0.0) {
                 if (!this.currentRegion) {
                     return null;
                 }
@@ -501,7 +501,39 @@
                     width, 
                     height,
                     viewCenterX,
-                    viewCenterY
+                    viewCenterY,
+                    zoom,
+                    animationTime
+                );
+                
+                if (!bufferPtr) {
+                    return null;
+                }
+                
+                return {
+                    ptr: bufferPtr,
+                    width: Module._get_pixel_buffer_width(bufferPtr),
+                    height: Module._get_pixel_buffer_height(bufferPtr)
+                };
+            }
+            
+            // Render region in 3D (isometric-style 3D view)
+            render3D(outputWidth = null, outputHeight = null, viewCenterX = -1, viewCenterY = -1, zoom = 1.0) {
+                if (!this.currentRegion) {
+                    return null;
+                }
+                
+                // Use canvas size if not specified
+                const width = outputWidth || canvas.width;
+                const height = outputHeight || canvas.height;
+                
+                const bufferPtr = Module._render_region_3d(
+                    this.currentRegion.ptr, 
+                    width, 
+                    height,
+                    viewCenterX,
+                    viewCenterY,
+                    zoom
                 );
                 
                 if (!bufferPtr) {
@@ -531,31 +563,38 @@
         let myPlayerId = 12345;
         let myX = 5000;
         let myY = 5000;
+        let lastSentX = null;
+        let lastSentY = null;
+        let lastSentFlags = null;
         let nearbyPlayers = [];
         let connected = false;
         let updateInterval = null;
         let serverUrl = 'http://localhost:8080';
         
+        // Animation time tracking for water animation
+        let animationStartTime = null;
+        
         // World region generator (client-side)
         let worldGen = null;
         let currentRegionCenterX = 0;
         let currentRegionCenterY = 0;
-        const REGION_RADIUS = 32; // tiles
+        const REGION_RADIUS = 10; // tiles (minimal radius for 5x zoom - region size = 9x9)
         
         // World seed (from barcode scan)
-        let worldSeed = 42; // Default seed
+        let worldSeed = 422; // Default seed
         
-        // Zoom state
-        let zoomLevel = 1.0;
-        const MIN_ZOOM = 0.25;
-        const MAX_ZOOM = 4.0;
+        // Zoom state - locked at 5x
+        let zoomLevel = 5.0;
+        const MIN_ZOOM = 5.0; // Locked
+        const MAX_ZOOM = 5.0; // Locked
         const ZOOM_STEP = 0.25;
         
-        // Smooth interpolation for movement
-        let displayX = 5000.0;  // Smooth position for rendering
+        // View mode (2D isometric or 3D)
+        let viewMode3D = false;
+        
+        // Display position (snaps to target, no interpolation)
+        let displayX = 5000.0;  // Display position for rendering
         let displayY = 5000.0;
-        let lastFrameTime = performance.now();
-        const INTERPOLATION_SPEED = 0.25; // Lerp factor (0-1, higher = faster, 0.25 = smooth and responsive)
         
         // Callback when WASM is ready
         function onWasmReady() {
@@ -566,8 +605,8 @@
                 log('World generator initialized', 'info');
                 
                 // Initialize display position to match target position
-                displayX = myX;
-                displayY = myY;
+                displayX = Math.floor(myX);
+                displayY = Math.floor(myY);
                 
                 // Generate initial region at player position
                 const region = worldGen.generateRegion(
@@ -723,23 +762,11 @@
                 }
             }
             
-            // Smooth interpolation function
-            function lerp(start, end, factor) {
-                return start + (end - start) * factor;
-            }
-            
-            // Update smooth display position
-            function updateSmoothPosition() {
-                const currentTime = performance.now();
-                const deltaTime = Math.min((currentTime - lastFrameTime) / 16.67, 2.0); // Cap at 2x normal speed
-                lastFrameTime = currentTime;
-                
-                // Use frame-rate independent interpolation
-                const lerpFactor = Math.min(INTERPOLATION_SPEED * deltaTime, 1.0);
-                
-                // Smoothly interpolate display position toward target position
-                displayX = lerp(displayX, myX, lerpFactor);
-                displayY = lerp(displayY, myY, lerpFactor);
+            // Update display position (snap to tile, no interpolation)
+            function updateDisplayPosition() {
+                // Snap directly to the target tile position
+                displayX = Math.floor(myX);
+                displayY = Math.floor(myY);
             }
             
             // Continuous movement check
@@ -751,8 +778,8 @@
             
             // Continuous rendering loop
             function renderLoop() {
-                // Update smooth position every frame
-                updateSmoothPosition();
+                // Update display position every frame (snap to tile)
+                updateDisplayPosition();
                 draw();
                 requestAnimationFrame(renderLoop);
             }
@@ -762,6 +789,15 @@
         // Draw game
         function draw() {
             if (!ctx) return;
+            
+            // Initialize animation time on first frame
+            if (animationStartTime === null) {
+                animationStartTime = performance.now() / 1000.0; // Convert to seconds
+            }
+            
+            // Calculate current animation time in seconds
+            const currentTime = performance.now() / 1000.0;
+            const animationTime = currentTime - animationStartTime;
             
             // Clear
             ctx.fillStyle = '#0a0a0a';
@@ -773,49 +809,123 @@
             
             // Draw terrain from generated region using C++ renderer (exact same as world.bmp)
             if (wasmReady && worldGen && worldGen.currentRegion) {
-                // Calculate render size based on zoom level
-                const renderWidth = Math.floor(canvas.width / zoomLevel);
-                const renderHeight = Math.floor(canvas.height / zoomLevel);
-                
-                // Render using C++ isometric renderer (same pipeline as world.bmp)
+                // Render at full canvas size with zoom - C++ renderer handles zoom correctly
                 // Center view on smooth display position (in world coordinates) for smooth movement
-                const renderBuffer = worldGen.renderIsometric(renderWidth, renderHeight, Math.floor(displayX), Math.floor(displayY));
+                const renderBuffer = viewMode3D 
+                    ? worldGen.render3D(
+                        canvas.width, 
+                        canvas.height, 
+                        Math.floor(displayX), 
+                        Math.floor(displayY),
+                        zoomLevel
+                    )
+                    : worldGen.renderIsometric(
+                        canvas.width, 
+                        canvas.height, 
+                        Math.floor(displayX), 
+                        Math.floor(displayY),
+                        zoomLevel,
+                        animationTime
+                    );
                 
                 if (renderBuffer) {
                     // Create ImageData from pixel buffer
                     const imageData = ctx.createImageData(renderBuffer.width, renderBuffer.height);
                     
-                    // Copy pixels from WASM buffer to ImageData
-                    for (let y = 0; y < renderBuffer.height; y++) {
-                        for (let x = 0; x < renderBuffer.width; x++) {
-                            const rgba = Module._get_pixel(renderBuffer.ptr, x, y);
-                            const idx = (y * renderBuffer.width + x) * 4;
+                    // OPTIMIZED: Direct memory access instead of per-pixel function calls
+                    // This is 10-50x faster than the previous double loop
+                    try {
+                        const dataPtr = Module._get_pixel_buffer_data(renderBuffer.ptr);
+                        const dataSize = Module._get_pixel_buffer_size_bytes(renderBuffer.ptr);
+                        
+                        if (dataPtr && dataSize > 0) {
+                            // Try multiple methods to access WASM memory
+                            let memoryBuffer = null;
                             
-                            // Extract RGBA components (stored as: RRRRRRRR GGGGGGGG BBBBBBBB AAAAAAAA)
-                            imageData.data[idx] = (rgba >> 24) & 0xFF;     // R
-                            imageData.data[idx + 1] = (rgba >> 16) & 0xFF; // G
-                            imageData.data[idx + 2] = (rgba >> 8) & 0xFF;  // B
-                            imageData.data[idx + 3] = rgba & 0xFF;          // A
+                            // Method 1: HEAPU8 (standard Emscripten)
+                            if (Module.HEAPU8 && Module.HEAPU8.buffer) {
+                                memoryBuffer = Module.HEAPU8.buffer;
+                            }
+                            // Method 2: HEAP8 (alternative)
+                            else if (Module.HEAP8 && Module.HEAP8.buffer) {
+                                memoryBuffer = Module.HEAP8.buffer;
+                            }
+                            // Method 3: Direct buffer access
+                            else if (Module.buffer) {
+                                memoryBuffer = Module.buffer;
+                            }
+                            // Method 4: WASM memory (newer Emscripten)
+                            else if (Module.wasmMemory && Module.wasmMemory.buffer) {
+                                memoryBuffer = Module.wasmMemory.buffer;
+                            }
+                            
+                            if (memoryBuffer) {
+                                // Create a view into WASM memory for direct access
+                                const dataView = new Uint8ClampedArray(
+                                    memoryBuffer, 
+                                    dataPtr, 
+                                    dataSize
+                                );
+                                
+                                // Single bulk copy operation - MUCH faster!
+                                imageData.data.set(dataView);
+                            } else {
+                                // Fall through to per-pixel method
+                                throw new Error('No WASM memory access method available');
+                            }
+                        } else {
+                            // Fallback to old method if optimized access not available
+                            // (HEAPU8 might not be available or dataPtr/dataSize invalid)
+                            for (let y = 0; y < renderBuffer.height; y++) {
+                                for (let x = 0; x < renderBuffer.width; x++) {
+                                    const rgba = Module._get_pixel(renderBuffer.ptr, x, y);
+                                    const idx = (y * renderBuffer.width + x) * 4;
+                                    imageData.data[idx] = (rgba >> 24) & 0xFF;
+                                    imageData.data[idx + 1] = (rgba >> 16) & 0xFF;
+                                    imageData.data[idx + 2] = (rgba >> 8) & 0xFF;
+                                    imageData.data[idx + 3] = rgba & 0xFF;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // Fallback if optimized method fails
+                        console.warn('Optimized pixel copy failed, using fallback:', e);
+                        for (let y = 0; y < renderBuffer.height; y++) {
+                            for (let x = 0; x < renderBuffer.width; x++) {
+                                const rgba = Module._get_pixel(renderBuffer.ptr, x, y);
+                                const idx = (y * renderBuffer.width + x) * 4;
+                                imageData.data[idx] = (rgba >> 24) & 0xFF;
+                                imageData.data[idx + 1] = (rgba >> 16) & 0xFF;
+                                imageData.data[idx + 2] = (rgba >> 8) & 0xFF;
+                                imageData.data[idx + 3] = rgba & 0xFF;
+                            }
                         }
                     }
                     
-                    // Create temporary canvas for the rendered image
-                    const tempCanvas = document.createElement('canvas');
-                    tempCanvas.width = renderBuffer.width;
-                    tempCanvas.height = renderBuffer.height;
-                    const tempCtx = tempCanvas.getContext('2d');
-                    tempCtx.putImageData(imageData, 0, 0);
+                    // Draw terrain - offset to center player if they're at edge of region
+                    // If player is at bottom corner, offset terrain so player appears at canvas center
+                    let drawX = 0;
+                    let drawY = 0;
                     
-                    // Calculate scaling and centering for zoom
-                    const scaleX = canvas.width / renderBuffer.width;
-                    const scaleY = canvas.height / renderBuffer.height;
-                    const scaledWidth = renderBuffer.width * scaleX * zoomLevel;
-                    const scaledHeight = renderBuffer.height * scaleY * zoomLevel;
-                    const offsetX = (canvas.width - scaledWidth) / 2;
-                    const offsetY = (canvas.height - scaledHeight) / 2;
+                    if (worldGen && worldGen.currentRegion && 
+                        (renderBuffer.width !== canvas.width || renderBuffer.height !== canvas.height)) {
+                        const playerLocalX = Math.floor(displayX) - worldGen.currentRegion.startX;
+                        const playerLocalY = Math.floor(displayY) - worldGen.currentRegion.startY;
+                        const regionWidth = worldGen.currentRegion.width;
+                        const regionHeight = worldGen.currentRegion.height;
+                        
+                        // Calculate normalized position (0.0 = top-left, 1.0 = bottom-right)
+                        const normX = playerLocalX / regionWidth;
+                        const normY = playerLocalY / regionHeight;
+                        
+                        // Offset terrain so player appears at canvas center
+                        // If player is at bottom-right (1.0, 1.0), offset by (canvas - buffer)
+                        // If player is at top-left (0.0, 0.0), offset by 0
+                        drawX = Math.round((canvas.width - renderBuffer.width) * normX);
+                        drawY = Math.round((canvas.height - renderBuffer.height) * normY);
+                    }
                     
-                    // Draw scaled and centered
-                    ctx.drawImage(tempCanvas, offsetX, offsetY, scaledWidth, scaledHeight);
+                    ctx.putImageData(imageData, drawX, drawY);
                     
                     // Free the pixel buffer
                     Module._free_pixel_buffer(renderBuffer.ptr);
@@ -846,63 +956,227 @@
             const TILE_WIDTH = 64;  // Default isometric tile width
             const TILE_HEIGHT = 32; // Default isometric tile height
             
-            nearbyPlayers.forEach(player => {
-                // Convert player world position to isometric screen coordinates
-                const playerWorldX = player.x;
-                const playerWorldY = player.y;
-                // Use smooth display position for centering
-                const myWorldX = displayX;
-                const myWorldY = displayY;
-                
-                // Calculate relative position from player to my position
-                const relX = playerWorldX - myWorldX;
-                const relY = playerWorldY - myWorldY;
-                
-                // Convert to isometric screen coordinates (relative to center)
-                const isoX = (relX - relY) * (TILE_WIDTH / 2);
-                const isoY = (relX + relY) * (TILE_HEIGHT / 2);
-                
-                // Center on screen (my player is at canvas center)
-                const screenX = canvas.width / 2 + isoX;
-                const screenY = canvas.height / 2 + isoY;
-                
-                // Only draw if on screen
-                if (screenX >= -20 && screenX <= canvas.width + 20 &&
-                    screenY >= -20 && screenY <= canvas.height + 20) {
+            // Use batch coordinate conversion for multiple players (optimization)
+            if (nearbyPlayers.length > 5 && Module._convert_world_to_isometric) {
+                try {
+                    // Allocate memory for input and output arrays
+                    const count = nearbyPlayers.length;
+                    const worldXPtr = Module._malloc(count * 4); // int = 4 bytes
+                    const worldYPtr = Module._malloc(count * 4);
+                    const screenXPtr = Module._malloc(count * 4);
+                    const screenYPtr = Module._malloc(count * 4);
                     
-                    // Draw player circle
-                    ctx.fillStyle = player.playerId === myPlayerId ? '#4caf50' : '#2196F3';
-                    ctx.beginPath();
-                    ctx.arc(screenX, screenY, 15, 0, Math.PI * 2);
-                    ctx.fill();
+                    // Fill input arrays
+                    const worldXView = new Int32Array(Module.HEAP32.buffer, worldXPtr, count);
+                    const worldYView = new Int32Array(Module.HEAP32.buffer, worldYPtr, count);
+                    nearbyPlayers.forEach((player, i) => {
+                        worldXView[i] = player.x;
+                        worldYView[i] = player.y;
+                    });
                     
-                    // Draw player ID
-                    ctx.fillStyle = '#fff';
-                    ctx.font = '12px monospace';
-                    ctx.textAlign = 'center';
-                    ctx.fillText(player.playerId.toString(), screenX, screenY - 25);
+                    // Call batch conversion
+                    Module._convert_world_to_isometric(
+                        worldXPtr, worldYPtr, count,
+                        Math.floor(displayX), Math.floor(displayY),
+                        canvas.width / 2, canvas.height / 2,
+                        TILE_WIDTH, TILE_HEIGHT,
+                        screenXPtr, screenYPtr
+                    );
+                    
+                    // Read results and apply zoom scaling
+                    const screenXView = new Int32Array(Module.HEAP32.buffer, screenXPtr, count);
+                    const screenYView = new Int32Array(Module.HEAP32.buffer, screenYPtr, count);
+                    
+                    nearbyPlayers.forEach((player, i) => {
+                        // CRITICAL: Apply zoom scaling to match terrain rendering
+                        // The base conversion gives us coordinates at zoom=1.0, so we scale by zoomLevel
+                        const baseX = screenXView[i];
+                        const baseY = screenYView[i];
+                        const screenX = canvas.width / 2 + (baseX - canvas.width / 2) * zoomLevel;
+                        const screenY = canvas.height / 2 + (baseY - canvas.height / 2) * zoomLevel;
+                        
+                        // Only draw if on screen
+                        if (screenX >= -20 && screenX <= canvas.width + 20 &&
+                            screenY >= -20 && screenY <= canvas.height + 20) {
+                            
+                            // Draw player circle
+                            ctx.fillStyle = player.playerId === myPlayerId ? '#4caf50' : '#2196F3';
+                            ctx.beginPath();
+                            ctx.arc(screenX, screenY, 15, 0, Math.PI * 2);
+                            ctx.fill();
+                            
+                            // Draw player ID
+                            ctx.fillStyle = '#fff';
+                            ctx.font = '12px monospace';
+                            ctx.textAlign = 'center';
+                            ctx.fillText(player.playerId.toString(), screenX, screenY - 25);
+                        }
+                    });
+                    
+                    // Free allocated memory
+                    Module._free(worldXPtr);
+                    Module._free(worldYPtr);
+                    Module._free(screenXPtr);
+                    Module._free(screenYPtr);
+                } catch (e) {
+                    // Fallback to per-player conversion if batch fails
+                    console.warn('Batch coordinate conversion failed, using fallback:', e);
+                    drawPlayersIndividually();
                 }
-            });
+            } else {
+                // Use individual conversion (faster for small numbers of players)
+                drawPlayersIndividually();
+            }
+            
+            function drawPlayersIndividually() {
+                nearbyPlayers.forEach(player => {
+                    // Convert player world position to isometric screen coordinates
+                    const playerWorldX = player.x;
+                    const playerWorldY = player.y;
+                    // Use smooth display position for centering
+                    const myWorldX = displayX;
+                    const myWorldY = displayY;
+                    
+                    // Calculate relative position from player to my position
+                    const relX = playerWorldX - myWorldX;
+                    const relY = playerWorldY - myWorldY;
+                    
+                    // Convert to isometric screen coordinates (relative to center)
+                    // Use renderer tile dimensions to match terrain rendering
+                    const RENDERER_TILE_WIDTH = 32;
+                    const RENDERER_TILE_HEIGHT = 16;
+                    const TILE_DEPTH = 8;
+                    const MAX_STACK_HEIGHT = 16;
+                    
+                    const isoX = (relX - relY) * (RENDERER_TILE_WIDTH / 2) * zoomLevel;
+                    const isoY = (relX + relY) * (RENDERER_TILE_HEIGHT / 2) * zoomLevel;
+                    
+                    // Get terrain height at other player's position to apply height offset
+                    let heightOffset = 0;
+                    if (worldGen && worldGen.currentRegion) {
+                        const playerTileX = Math.floor(playerWorldX);
+                        const playerTileY = Math.floor(playerWorldY);
+                        const encodedHeight = Module._get_terrain_cell_height_animated(
+                            worldGen.currentRegion.ptr,
+                            playerTileX,
+                            playerTileY,
+                            animationTime,
+                            1.0 // waterAnimationSpeed
+                        );
+                        if (encodedHeight > 0) {
+                            const terrainHeight = encodedHeight / 10000.0;
+                            const heightPx = terrainHeight * MAX_STACK_HEIGHT * TILE_DEPTH;
+                            // Apply height offset (higher terrain appears higher on screen, smaller Y)
+                            heightOffset = -heightPx * zoomLevel;
+                        }
+                    }
+                    
+                    // Center on screen (my player is at canvas center)
+                    const screenX = canvas.width / 2 + isoX;
+                    const screenY = canvas.height / 2 + isoY + heightOffset;
+                    
+                    // Only draw if on screen
+                    if (screenX >= -20 && screenX <= canvas.width + 20 &&
+                        screenY >= -20 && screenY <= canvas.height + 20) {
+                        
+                        // Draw player circle
+                        ctx.fillStyle = player.playerId === myPlayerId ? '#4caf50' : '#2196F3';
+                        ctx.beginPath();
+                        ctx.arc(screenX, screenY, 15, 0, Math.PI * 2);
+                        ctx.fill();
+                        
+                        // Draw player ID
+                        ctx.fillStyle = '#fff';
+                        ctx.font = '12px monospace';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(player.playerId.toString(), screenX, screenY - 25);
+                    }
+                });
+            }
             
             // Draw my player (always visible, centered)
+            // Position player to match tile anchor point (center of diamond)
+            // Tiles use worldToScreen conversion and anchor at that position
+            // Note: Actual tile size in renderer is 32x16, but TILE_WIDTH/HEIGHT are already defined above
+            const TILE_DEPTH = 8;
+            const MAX_STACK_HEIGHT = 16;
+            // Use actual renderer tile dimensions (32x16) instead of the display constants (64x32)
+            const RENDERER_TILE_WIDTH = 32;
+            const RENDERER_TILE_HEIGHT = 16;
+            
+            let playerX = canvas.width / 2;
+            let playerY = canvas.height / 2;
+            
+            if (wasmReady && worldGen && worldGen.currentRegion) {
+                // Get the tile the player is on (for height lookup)
+                const playerTileX = Math.floor(displayX);
+                const playerTileY = Math.floor(displayY);
+                
+                // Use animated height function - this returns the animated height for water tiles
+                // so the player automatically bobs with the waves
+                const waterAnimationSpeed = 1.0; // Should match config
+                const encodedHeight = Module._get_terrain_cell_height_animated(
+                    worldGen.currentRegion.ptr, 
+                    playerTileX, 
+                    playerTileY,
+                    animationTime,
+                    waterAnimationSpeed
+                );
+                
+                if (encodedHeight > 0) {
+                    // Decode height (was multiplied by 10000)
+                    // This height already includes water animation offset for water tiles
+                    const terrainHeight = encodedHeight / 10000.0;
+                    
+                    // Calculate the player's position relative to the view center
+                    // The terrain is rendered centered on Math.floor(displayX), Math.floor(displayY)
+                    const viewCenterX = Math.floor(displayX);
+                    const viewCenterY = Math.floor(displayY);
+                    
+                    // Player's offset from the view center (can be fractional)
+                    const playerOffsetX = displayX - viewCenterX;
+                    const playerOffsetY = displayY - viewCenterY;
+                    
+                    // Convert player offset to isometric screen coordinates
+                    // This uses the same worldToScreen formula: sx = (wx - wy) * (tileWidth/2), sy = (wx + wy) * (tileHeight/2)
+                    const isoX = (playerOffsetX - playerOffsetY) * (RENDERER_TILE_WIDTH / 2);
+                    const isoY = (playerOffsetX + playerOffsetY) * (RENDERER_TILE_HEIGHT / 2);
+                    
+                    // Calculate height in pixels (same as tile rendering)
+                    const heightPx = terrainHeight * MAX_STACK_HEIGHT * TILE_DEPTH;
+                    
+                    // Apply height offset (higher terrain appears higher on screen, smaller Y)
+                    // This matches: sy -= heightPx in tile rendering
+                    const finalIsoY = isoY - heightPx;
+                    
+                    // Player is at canvas center, add the isometric offset with zoom
+                    playerX = canvas.width / 2 + isoX * zoomLevel;
+                    playerY = canvas.height / 2 + finalIsoY * zoomLevel;
+                }
+            }
+            
             ctx.fillStyle = '#4caf50';
             ctx.beginPath();
-            ctx.arc(canvas.width / 2, canvas.height / 2, 20, 0, Math.PI * 2);
+            ctx.arc(playerX, playerY, 20, 0, Math.PI * 2);
             ctx.fill();
             
             ctx.fillStyle = '#fff';
             ctx.font = 'bold 14px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText('YOU', canvas.width / 2, canvas.height / 2 - 30);
+            ctx.fillText('YOU', playerX, playerY - 30);
             
-            // Draw coordinates
+            // Draw coordinates and debug info
             ctx.fillStyle = '#888';
             ctx.font = '12px monospace';
             ctx.textAlign = 'left';
             ctx.fillText(`X: ${Math.floor(displayX)}, Y: ${Math.floor(displayY)}`, 10, 30);
+            if (worldGen && worldGen.currentRegion) {
+                ctx.fillText(`Region: (${worldGen.currentRegion.startX}, ${worldGen.currentRegion.startY}) size: ${worldGen.currentRegion.width}x${worldGen.currentRegion.height}`, 10, 45);
+                ctx.fillText(`Player in region: (${Math.floor(displayX) - worldGen.currentRegion.startX}, ${Math.floor(displayY) - worldGen.currentRegion.startY})`, 10, 60);
+            }
         }
         
-        // Send move update to server
+        // Send move update to server with axis-aligned delta packing
         async function sendMoveUpdate() {
             // Update client-side region based on position
             updateRegionForPosition();
@@ -910,18 +1184,62 @@
             if (!connected) return;
             
             try {
-                // Create MovePacket (uint16_t playerId, uint16_t x, uint16_t y, uint16_t flagsAndDelta)
-                const buffer = new ArrayBuffer(1 + 8); // 1 byte count + 8 bytes MovePacket
+                // Determine which fields changed
+                const xChanged = (lastSentX === null || lastSentX !== myX);
+                const yChanged = (lastSentY === null || lastSentY !== myY);
+                const flagsAndDelta = (0 << 12) | 16; // flags=0, delta=16ms
+                const flagsChanged = (lastSentFlags === null || lastSentFlags !== flagsAndDelta);
+                
+                // Calculate field mask
+                const MOVE_PACKET_HAS_X = 0x01;
+                const MOVE_PACKET_HAS_Y = 0x02;
+                const MOVE_PACKET_HAS_FLAGS = 0x04;
+                const MOVE_PACKET_SINGLE = 0x80; // Single packet mode (no count byte)
+                
+                let fieldMask = MOVE_PACKET_SINGLE; // Set single packet bit
+                if (xChanged) fieldMask |= MOVE_PACKET_HAS_X;
+                if (yChanged) fieldMask |= MOVE_PACKET_HAS_Y;
+                if (flagsChanged) fieldMask |= MOVE_PACKET_HAS_FLAGS;
+                
+                // Calculate packet size: playerId (2) + fieldMask (1) + optional fields
+                // No count byte for single packets!
+                let packetSize = 3; // base: playerId + fieldMask
+                if (fieldMask & MOVE_PACKET_HAS_X) packetSize += 2;
+                if (fieldMask & MOVE_PACKET_HAS_Y) packetSize += 2;
+                if (fieldMask & MOVE_PACKET_HAS_FLAGS) packetSize += 2;
+                
+                // Create buffer with variable-length packet (no count byte for single packets)
+                const buffer = new ArrayBuffer(packetSize);
                 const view = new DataView(buffer);
                 
-                // Count
-                view.setUint8(0, 1);
+                let offset = 0;
                 
-                // MovePacket
-                view.setUint16(1, myPlayerId, true); // little-endian
-                view.setUint16(3, myX, true);
-                view.setUint16(5, myY, true);
-                view.setUint16(7, (0 << 12) | 16, true); // flags=0, delta=16ms
+                // Write playerId
+                view.setUint16(offset, myPlayerId, true); // little-endian
+                offset += 2;
+                
+                // Write field mask
+                view.setUint8(offset, fieldMask);
+                offset += 1;
+                
+                // Write optional fields based on mask (snap to tile before sending)
+                if (fieldMask & MOVE_PACKET_HAS_X) {
+                    view.setUint16(offset, Math.floor(myX), true);
+                    offset += 2;
+                }
+                if (fieldMask & MOVE_PACKET_HAS_Y) {
+                    view.setUint16(offset, Math.floor(myY), true);
+                    offset += 2;
+                }
+                if (fieldMask & MOVE_PACKET_HAS_FLAGS) {
+                    view.setUint16(offset, flagsAndDelta, true);
+                    offset += 2;
+                }
+                
+                // Update last sent values
+                if (xChanged) lastSentX = myX;
+                if (yChanged) lastSentY = myY;
+                if (flagsChanged) lastSentFlags = flagsAndDelta;
                 
                 const response = await fetch(`${serverUrl}/move_batch`, {
                     method: 'POST',
@@ -976,6 +1294,11 @@
             
             try {
                 log(`Connecting to ${serverUrl}...`, 'info');
+                
+                // Reset last sent values on connect to ensure full packet is sent
+                lastSentX = null;
+                lastSentY = null;
+                lastSentFlags = null;
                 
                 // Test connection with a move update
                 await sendMoveUpdate();
@@ -1059,31 +1382,35 @@
             function emitResult(text) {
                 // Convert barcode text to a seed (hash the string to uint64_t)
                 // Use a simple hash function to convert string to number
+                // This seed will be used for all terrain generation (noise, biomes, structures)
                 function hashStringToSeed(str) {
                     let hash = 0n;
                     for (let i = 0; i < str.length; i++) {
                         const char = str.charCodeAt(i);
                         hash = ((hash << 5n) - hash) + BigInt(char);
-                        hash = hash & hash; // Convert to 64-bit integer
+                        // Mask to 64 bits to ensure consistent uint64_t conversion
+                        hash = hash & 0xFFFFFFFFFFFFFFFFn;
                     }
-                    // Ensure positive and reasonable range
+                    // Ensure positive (uint64_t)
                     return hash < 0n ? -hash : hash;
                 }
                 
                 const newSeed = hashStringToSeed(text);
                 log(`Barcode scanned: "${text}" -> Seed: ${newSeed}`, 'info');
                 
-                // Update world seed and regenerate world
+                // Update world seed - this will be used as the seed for terrain generation
                 worldSeed = Number(newSeed);
                 
                 // Reinitialize world generator with new seed
+                // This creates a new WorldRegionGenerator with the barcode-derived seed,
+                // which will be used for all noise generation and terrain features
                 if (wasmReady && worldGen) {
                     try {
                         worldGen.free(); // Free old region
                         worldGen = new WorldRegionGenerator(worldSeed, REGION_RADIUS, 0.3);
-                        worldGen.init();
+                        worldGen.init(); // Initialize WASM generator with the new seed
                         
-                        // Generate new region at current position
+                        // Generate new region at current position using the new seed
                         const region = worldGen.generateRegion(
                             Math.floor(myX),
                             Math.floor(myY),
@@ -1986,38 +2313,58 @@
                 setInterval(handleButtonMovement, 16);
             }
             
-            // Initialize zoom controls
+            // Initialize zoom controls (zoom is locked at 5x)
             function initZoomControls() {
                 const zoomInBtn = document.getElementById('btnZoomIn');
                 const zoomOutBtn = document.getElementById('btnZoomOut');
+                const toggle3DBtn = document.getElementById('btnToggle3D');
                 const zoomLevelDisplay = document.getElementById('zoomLevel');
                 
                 function updateZoomDisplay() {
-                    zoomLevelDisplay.textContent = zoomLevel.toFixed(2) + 'x';
+                    if (zoomLevelDisplay) {
+                        zoomLevelDisplay.textContent = zoomLevel.toFixed(1) + 'x';
+                    }
                 }
                 
+                // Zoom is locked, but keep functions for compatibility
                 function zoomIn() {
-                    zoomLevel = Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP);
-                    updateZoomDisplay();
+                    // Zoom locked at 5x - do nothing
                 }
                 
                 function zoomOut() {
-                    zoomLevel = Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP);
-                    updateZoomDisplay();
+                    // Zoom locked at 5x - do nothing
                 }
                 
-                zoomInBtn.addEventListener('click', zoomIn);
-                zoomOutBtn.addEventListener('click', zoomOut);
+                // Only add event listeners if buttons exist (they're removed when zoom is locked)
+                if (zoomInBtn) {
+                    zoomInBtn.addEventListener('click', zoomIn);
+                }
+                if (zoomOutBtn) {
+                    zoomOutBtn.addEventListener('click', zoomOut);
+                }
                 
-                // Mouse wheel zoom
-                canvas.addEventListener('wheel', (e) => {
-                    e.preventDefault();
-                    if (e.deltaY < 0) {
-                        zoomIn();
-                    } else {
-                        zoomOut();
-                    }
-                });
+                // Toggle 3D view
+                if (toggle3DBtn) {
+                    toggle3DBtn.addEventListener('click', () => {
+                        viewMode3D = !viewMode3D;
+                        toggle3DBtn.textContent = viewMode3D ? '2D' : '3D';
+                        toggle3DBtn.style.background = viewMode3D 
+                            ? 'rgba(255, 152, 0, 0.8)' 
+                            : 'rgba(33, 150, 243, 0.8)';
+                        log(`Switched to ${viewMode3D ? '3D' : '2D'} view`, 'info');
+                        draw(); // Force redraw when view mode changes
+                    });
+                }
+                
+                // Mouse wheel zoom (disabled - zoom locked at 5x)
+                // canvas.addEventListener('wheel', (e) => {
+                //     e.preventDefault();
+                //     if (e.deltaY < 0) {
+                //         zoomIn();
+                //     } else {
+                //         zoomOut();
+                //     }
+                // });
                 
                 // Touch pinch zoom (basic implementation)
                 let lastTouchDistance = 0;
